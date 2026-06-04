@@ -1,4 +1,4 @@
-name: aloha
+name: act_env
 channels:
   - pytorch
   - nvidia

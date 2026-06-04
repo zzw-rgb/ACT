@@ -30,19 +30,24 @@ class PositionEmbeddingSine(nn.Module):
         # assert mask is not None
         # not_mask = ~mask
 
+        # 当前代码没有传入真实 padding mask，因此把整张特征图都视为有效区域。
         not_mask = torch.ones_like(x[0, [0]])
+        # cumsum 生成每个像素位置的 y/x 坐标网格。
         y_embed = not_mask.cumsum(1, dtype=torch.float32)
         x_embed = not_mask.cumsum(2, dtype=torch.float32)
         if self.normalize:
+            # DETR 常用做法：把坐标归一化到 0..2pi，提升不同分辨率下的位置尺度一致性。
             eps = 1e-6
             y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
+        # dim_t 是不同频率的分母，低维关注粗位置，高维关注细粒度位置。
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
+        # 偶数维用 sin、奇数维用 cos，然后把 y/x 两个方向拼成 (batch, hidden_dim, h, w)。
         pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
@@ -66,6 +71,7 @@ class PositionEmbeddingLearned(nn.Module):
     def forward(self, tensor_list: NestedTensor):
         x = tensor_list.tensors
         h, w = x.shape[-2:]
+        # learned 版本直接为每一行/列查表，再拼成二维绝对位置编码。
         i = torch.arange(w, device=x.device)
         j = torch.arange(h, device=x.device)
         x_emb = self.col_embed(i)
@@ -81,6 +87,7 @@ def build_position_encoding(args):
     N_steps = args.hidden_dim // 2
     if args.position_embedding in ('v2', 'sine'):
         # TODO find a better way of exposing other arguments
+        # ACT/DETR 默认使用二维正弦位置编码，与 CNN 输出特征图天然对齐。
         position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
     elif args.position_embedding in ('v3', 'learned'):
         position_embedding = PositionEmbeddingLearned(N_steps)

@@ -44,18 +44,22 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed, latent_input=None, proprio_input=None, additional_pos_embed=None):
+        """把视觉/状态 token 编码成 memory，再用动作 query 解码出一段未来动作表示。"""
         # TODO flatten only when input has H and W
         if len(src.shape) == 4: # has H and W
             # flatten NxCxHxW to HWxNxC
             bs, c, h, w = src.shape
+            # 图像特征图从 (batch, channel, height, width) 展平成 Transformer 习惯的 (seq, batch, dim)。
             src = src.flatten(2).permute(2, 0, 1)
             pos_embed = pos_embed.flatten(2).permute(2, 0, 1).repeat(1, bs, 1)
             query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
             # mask = mask.flatten(1)
 
+            # latent 和 proprio 两个额外 token 也需要独立的位置嵌入。
             additional_pos_embed = additional_pos_embed.unsqueeze(1).repeat(1, bs, 1) # seq, bs, dim
             pos_embed = torch.cat([additional_pos_embed, pos_embed], axis=0)
 
+            # 将 [latent, qpos] 放到视觉 token 前面，让 encoder 同时看到动作风格和机器人当前状态。
             addition_input = torch.stack([latent_input, proprio_input], axis=0)
             src = torch.cat([addition_input, src], axis=0)
         else:
@@ -66,10 +70,13 @@ class Transformer(nn.Module):
             pos_embed = pos_embed.unsqueeze(1).repeat(1, bs, 1)
             query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
+        # decoder 的实际输入初值为 0，query_embed 负责区分不同未来时间步的动作槽位。
         tgt = torch.zeros_like(query_embed)
+        # encoder 输出 memory，包含图像、latent、qpos 等所有输入 token 的上下文表示。
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, query_pos=query_embed)
+        # 输出调整为 (num_layers, batch, num_queries, hidden_dim)，方便动作头逐 query 预测。
         hs = hs.transpose(1, 2)
         return hs
 
@@ -87,6 +94,7 @@ class TransformerEncoder(nn.Module):
                 pos: Optional[Tensor] = None):
         output = src
 
+        # 多层 encoder 顺序堆叠，每层都把位置编码加到注意力的 q/k 上。
         for layer in self.layers:
             output = layer(output, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
@@ -117,6 +125,7 @@ class TransformerDecoder(nn.Module):
 
         intermediate = []
 
+        # decoder 反复用动作 query 访问 encoder memory；可选地保存每层输出用于中间监督/分析。
         for layer in self.layers:
             output = layer(output, memory, tgt_mask=tgt_mask,
                            memory_mask=memory_mask,
@@ -165,6 +174,7 @@ class TransformerEncoderLayer(nn.Module):
                      src_mask: Optional[Tensor] = None,
                      src_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None):
+        # Encoder layer: 自注意力看整个输入 token 序列，再经过 FFN。
         q = k = self.with_pos_embed(src, pos)
         src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
                               key_padding_mask=src_key_padding_mask)[0]
@@ -230,17 +240,20 @@ class TransformerDecoderLayer(nn.Module):
                      memory_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None,
                      query_pos: Optional[Tensor] = None):
+        # 1) query 之间先做 self-attention，让不同未来时间步的动作槽位互相协调。
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+        # 2) 再对 encoder memory 做 cross-attention，从图像、qpos、latent 中读取条件信息。
         tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
                                    key=self.with_pos_embed(memory, pos),
                                    value=memory, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
+        # 3) FFN 对每个 query 独立变换，保持 Transformer 标准残差结构。
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)

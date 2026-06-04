@@ -75,13 +75,13 @@ loss = L1(action, predicted_action) + kl_weight * KL(z)
 
 ```powershell
 conda env create -f conda_env.yaml
-conda activate aloha
+conda activate act_env
 ```
 
 如果环境已经建好，只需要：
 
 ```powershell
-conda activate aloha
+conda activate act_env
 ```
 
 注意：项目依赖 MuJoCo、dm_control 和 PyTorch CUDA，训练和评估最好在有 NVIDIA 显卡的环境里运行。
